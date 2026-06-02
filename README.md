@@ -50,10 +50,12 @@ Sistem bekerja sepenuhnya *loosely coupled*: setiap aplikasi tidak mengetahui ke
 
 | Method | Path | Deskripsi |
 |--------|------|-----------|
+| `POST` | `/students/` | Daftarkan mahasiswa ke sistem perpustakaan |
+| `GET` | `/students/{nim}` | Detail mahasiswa di sistem perpustakaan |
 | `POST` | `/books/` | Tambah buku baru |
 | `GET` | `/books/` | Daftar semua buku |
 | `GET` | `/books/{book_id}` | Detail buku |
-| `POST` | `/loans/` | Buat transaksi peminjaman |
+| `POST` | `/loans/` | Buat transaksi peminjaman (gunakan `student_nim`) |
 | `PATCH` | `/loans/{loan_id}/return` | Kembalikan buku — **memicu event RabbitMQ jika terlambat** |
 
 > Dokumentasi interaktif: `http://localhost:8001/docs`
@@ -250,15 +252,8 @@ File `.env` sudah tersedia di root repositori. Verifikasi isinya:
 cat .env
 ```
 
-> Untuk keperluan produksi, ganti semua nilai password dengan nilai yang lebih kuat.
 
 **3. Bangun image dan jalankan seluruh layanan**
-
-```bash
-docker compose up --build
-```
-
-Tambahkan flag `-d` untuk menjalankan di background:
 
 ```bash
 docker compose up --build -d
@@ -285,33 +280,38 @@ curl -X POST http://localhost:8003/students/ \
   -H "Content-Type: application/json" \
   -d '{"nim":"102022400067","name":"Paris","program_studi":"Sistem Informasi","angkatan":"2022"}'
 
-# b) Tambah buku ke Perpustakaan
+# b) Daftarkan mahasiswa yang sama ke sistem Perpustakaan
+curl -X POST http://localhost:8001/students/ \
+  -H "Content-Type: application/json" \
+  -d '{"nim":"102022400067","name":"Paris"}'
+
+# c) Tambah buku ke Perpustakaan
 curl -X POST http://localhost:8001/books/ \
   -H "Content-Type: application/json" \
   -d '{"title":"Pengantar EAI","isbn":"978-000-0000-00-0","author":"Dosen EAI"}'
 
-# Catat book_id dari respons
+# Catat book_id dari respons langkah c
 
-# c) Buat peminjaman (gunakan id dari langkah b)
+# d) Buat peminjaman (gunakan book_id dari langkah c, student_nim berupa NIM)
 curl -X POST http://localhost:8001/loans/ \
   -H "Content-Type: application/json" \
-  -d '{"book_id":"<book_id>","student_id":"102022400067","loan_date":"2025-05-01","due_date":"2025-05-15"}'
+  -d '{"book_id":"<book_id>","student_nim":"102022400067","loan_date":"2025-05-01","due_date":"2025-05-15"}'
 
 # Catat loan_id dari respons
 
-# d) Kembalikan buku TERLAMBAT — ini memicu event integrasi
+# e) Kembalikan buku TERLAMBAT — ini memicu event integrasi
 curl -X PATCH http://localhost:8001/loans/<loan_id>/return \
   -H "Content-Type: application/json" \
   -d '{"return_date":"2025-06-02"}'
 ```
 
-Setelah langkah (d), Integration Layer akan:
+Setelah langkah (e), Integration Layer akan:
 1. Menerima event `book.return.late` dari RabbitMQ
 2. Membuat denda di Keuangan via SOAP
 3. Menangguhkan status akademik mahasiswa di SIAKAD
 
 ```bash
-# e) Verifikasi: cek status mahasiswa di SIAKAD
+# f) Verifikasi: cek status mahasiswa di SIAKAD
 curl http://localhost:8003/students/102022400067
 # academic_status harus menjadi "SUSPENDED"
 ```
@@ -347,6 +347,7 @@ docker compose down -v
 │       ├── models.py
 │       ├── publisher.py          ← EIP: Publish-Subscribe
 │       └── routers/
+│           ├── students.py
 │           ├── books.py
 │           └── loans.py
 ├── keuangan/

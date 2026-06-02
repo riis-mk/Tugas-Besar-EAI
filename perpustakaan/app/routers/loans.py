@@ -12,7 +12,7 @@ router = APIRouter()
 
 class LoanCreate(BaseModel):
     book_id: str
-    student_id: str
+    student_nim: str
     loan_date: date
     due_date: date
 
@@ -23,7 +23,18 @@ class ReturnPayload(BaseModel):
 
 @router.post("/", status_code=201)
 def create_loan(payload: LoanCreate, db: Session = Depends(get_db)):
-    loan = models.Loan(**payload.model_dump())
+    student = db.query(models.Student).filter(models.Student.nim == payload.student_nim).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not registered in library system")
+    book = db.query(models.Book).filter(models.Book.id == payload.book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    loan = models.Loan(
+        book_id=payload.book_id,
+        student_id=student.id,
+        loan_date=payload.loan_date,
+        due_date=payload.due_date,
+    )
     db.add(loan)
     db.commit()
     db.refresh(loan)
