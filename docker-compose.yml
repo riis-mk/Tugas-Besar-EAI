@@ -1,0 +1,143 @@
+services:
+
+  # ───────────────────────────────────────────────────────────────
+  # Message Broker
+  # ───────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI → http://localhost:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ───────────────────────────────────────────────────────────────
+  # Databases
+  # ───────────────────────────────────────────────────────────────
+  postgres_perpustakaan:
+    image: postgres:16-alpine
+    container_name: postgres_perpustakaan
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PERPUSTAKAAN_DB_NAME}
+      POSTGRES_USER: ${PERPUSTAKAAN_DB_USER}
+      POSTGRES_PASSWORD: ${PERPUSTAKAAN_DB_PASS}
+    volumes:
+      - pgdata_perpustakaan:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PERPUSTAKAAN_DB_USER} -d ${PERPUSTAKAAN_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres_siakad:
+    image: postgres:16-alpine
+    container_name: postgres_siakad
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SIAKAD_DB_NAME}
+      POSTGRES_USER: ${SIAKAD_DB_USER}
+      POSTGRES_PASSWORD: ${SIAKAD_DB_PASS}
+    volumes:
+      - pgdata_siakad:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SIAKAD_DB_USER} -d ${SIAKAD_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mysql_keuangan:
+    image: mysql:8.0
+    container_name: mysql_keuangan
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${KEUANGAN_DB_NAME}
+      MYSQL_USER: ${KEUANGAN_DB_USER}
+      MYSQL_PASSWORD: ${KEUANGAN_DB_PASS}
+      MYSQL_ROOT_PASSWORD: ${KEUANGAN_DB_ROOT_PASS}
+    volumes:
+      - mysqldata_keuangan:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "--password=${KEUANGAN_DB_ROOT_PASS}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ───────────────────────────────────────────────────────────────
+  # Application Services
+  # ───────────────────────────────────────────────────────────────
+  perpustakaan:
+    build: ./perpustakaan
+    container_name: perpustakaan
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${PERPUSTAKAAN_DB_USER}:${PERPUSTAKAAN_DB_PASS}@postgres_perpustakaan:5432/${PERPUSTAKAAN_DB_NAME}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres_perpustakaan:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  keuangan:
+    build: ./keuangan
+    container_name: keuangan
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+pymysql://${KEUANGAN_DB_USER}:${KEUANGAN_DB_PASS}@mysql_keuangan:3306/${KEUANGAN_DB_NAME}
+    ports:
+      - "8002:8000"
+    depends_on:
+      mysql_keuangan:
+        condition: service_healthy
+
+  siakad:
+    build: ./siakad
+    container_name: siakad
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${SIAKAD_DB_USER}:${SIAKAD_DB_PASS}@postgres_siakad:5432/${SIAKAD_DB_NAME}
+    ports:
+      - "8003:8000"
+    depends_on:
+      postgres_siakad:
+        condition: service_healthy
+
+  # ───────────────────────────────────────────────────────────────
+  # Integration Layer (EAI Hub)
+  # ───────────────────────────────────────────────────────────────
+  integration_layer:
+    build: ./integration-layer
+    container_name: integration_layer
+    restart: unless-stopped
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      KEUANGAN_SOAP_URL: http://keuangan:8000/soap
+      SIAKAD_REST_URL: http://siakad:8000
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      keuangan:
+        condition: service_started
+      siakad:
+        condition: service_started
+
+volumes:
+  rabbitmq_data:
+  pgdata_perpustakaan:
+  pgdata_siakad:
+  mysqldata_keuangan:
