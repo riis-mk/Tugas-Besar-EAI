@@ -3,6 +3,7 @@
 **Judul Proyek:** SIAKAD × Keuangan × Perpustakaan Integrasi Event-Driven Berbasis RabbitMQ 
 **Anggota Kelompok :**
 **NIM:** 102022400067 **Nama** Paris
+
 **NIM:** 102022400046 **Nama** jazman Jati Muhtadi
 
 ---
