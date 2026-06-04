@@ -1,6 +1,17 @@
-# Integrasi Aplikasi Enterprise — SIAKAD × Keuangan × Perpustakaan
+# SIAKAD × Keuangan × Perpustakaan — Integrasi Event-Driven Berbasis RabbitMQ
 
-Proyek Tugas Besar mata kuliah **Integrasi Aplikasi Enterprise** yang mengintegrasikan tiga sistem mandiri (SIAKAD, Keuangan, Perpustakaan) menggunakan arsitektur *event-driven* berbasis **RabbitMQ** dan pola-pola **Enterprise Integration Patterns (EIP)**.
+> Tugas Besar Mata Kuliah **Integrasi Aplikasi Enterprise** — Semester 4
+
+**Anggota Kelompok:**
+
+| NIM | Nama |
+|-----|------|
+| 102022400067 | Paris |
+| 102022400046 | Jazman Jati Muhtadi |
+
+Proyek ini mengintegrasikan tiga sistem informasi kampus yang heterogen menggunakan arsitektur *event-driven* berbasis **RabbitMQ** dan pola-pola **Enterprise Integration Patterns (EIP)**.
+
+> **Dokumen pendukung:** [proposal.md](proposal.md) — tema, daftar aplikasi & format data, diagram arsitektur | [spesifikasi.md](spesifikasi.md) — spesifikasi teknis | [laporan.md](laporan.md) — laporan EIP & transformasi data
 
 ---
 
@@ -390,3 +401,13 @@ docker compose down -v
 | **Content-Based Router** | `integration-layer/router.py` | Routing berdasarkan `event_type` dalam CDM |
 | **Dead-Letter Queue** | `integration-layer/consumer.py` | Pesan gagal/malformed diarahkan ke `library.dlq` untuk audit |
 | **Canonical Data Model** | `integration-layer/cdm/models.py` | Model perantara teknologi-agnostik (`LateFeeEventCDM`) |
+
+---
+
+## Dokumen Terkait
+
+| Dokumen | Isi |
+|---------|-----|
+| [proposal.md](proposal.md) | Proposal tema, daftar aplikasi & format data, diagram arsitektur integrasi |
+| [spesifikasi.md](spesifikasi.md) | Spesifikasi teknis lengkap semua komponen (stack, endpoint, skema DB) |
+| [laporan.md](laporan.md) | Laporan EIP yang diterapkan, mapping transformasi data, kendala & solusi |
