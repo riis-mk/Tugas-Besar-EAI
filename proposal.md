@@ -7,7 +7,7 @@
 | NIM | Nama |
 |-----|------|
 | 102022400067 | Paris |
-| 102022400067 | Jazman Jati Muhtadi |
+| 102022400046 | Jazman Jati Muhtadi |
 
 ---
 
