@@ -25,33 +25,35 @@ Proyek ini mengintegrasikan tiga sistem informasi kampus yang heterogen mengguna
 │  │  Perpustakaan    │  │    Keuangan       │  │     SIAKAD       │  │
 │  │  FastAPI :8001   │  │  Flask+Spyne :8002│  │  FastAPI :8003   │  │
 │  │  PostgreSQL      │  │  MySQL            │  │  PostgreSQL      │  │
-│  └────────┬─────────┘  └────────▲──────────┘  └────────▲─────────┘  │
-└───────────┼──────────────────────┼────────────────────────┼──────────┘
-            │ Publish-Subscribe    │ SOAP/XML               │ REST/JSON
-            │ JSON event           │ (Message Translator)   │ (Message Translator)
-            ▼                      │                        │
-┌──────────────────────────────────┼────────────────────────┼──────────┐
-│  RabbitMQ (library.exchange)     │                        │          │
-│   routing_key: book.return.late  │                        │          │
-│                ▼                 │                        │          │
-│   library.events.queue           │                        │          │
-│         ↓ (on reject)            │                        │          │
-│   library.dlq (Dead-Letter)      │                        │          │
-└────────────────┬─────────────────┼────────────────────────┼──────────┘
-                 │ consume          │                        │
-                 ▼                 │                        │
-┌────────────────────────────────────────────────────────────────────┐
-│  Integration Layer (Pure Python / pika)                            │
-│                                                                    │
-│  [1] Message Translator: JSON raw bytes → Canonical Data Model     │
-│  [2] Content-Based Router: dispatch by event_type                  │
-│  [3] Message Translator: CDM → SOAP 1.1 Envelope (XML)            │
-│       └→ POST /soap ──────────────────────────────────────────────►│
-│  [4] REST call: PATCH /students/{nim}/status ─────────────────────►│
-└────────────────────────────────────────────────────────────────────┘
+│  └────────┬─────────┘  └────────▲──────────┘  └──────▲──┬────────┘  │
+└───────────┼──────────────────────┼──────────────────────┼──┼─────────┘
+            │                     │ SOAP/XML              │  │ REST/JSON (fetch mahasiswa)
+            │ Publish-Subscribe    │ (Message Translator)  │  └──────────────────────────►│
+            │ JSON event           │                       │ REST/JSON (update utang)      │
+            ▼                     │                       │ REST/JSON (suspensi)          │
+┌───────────────────────────────────┼───────────────────────┼──────────────────────────────┘
+│  RabbitMQ (library.exchange)      │                       │
+│   routing_key: book.return.late   │                       │
+│                ▼                  │                       │
+│   library.events.queue            │                       │
+│         ↓ (on reject)             │                       │
+│   library.dlq (Dead-Letter)       │                       │
+└─────────────────┬─────────────────┼───────────────────────┼──────────┘
+                  │ consume          │                       │
+                  ▼                 │                       │
+┌─────────────────────────────────────────────────────────────────────┐
+│  Integration Layer (Pure Python / pika)                             │
+│                                                                     │
+│  [1] Message Translator: JSON raw bytes → Canonical Data Model      │
+│  [2] Content-Based Router: dispatch by event_type                   │
+│  [3] Message Translator: CDM → SOAP 1.1 Envelope (XML)             │
+│       └→ POST /soap ─────────────────────────────────────────────► │
+│  [4] REST call: PATCH /students/{nim}/library-debt ──────────────► │
+│  [5] REST call: PATCH /students/{nim}/status ────────────────────► │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-Sistem bekerja sepenuhnya *loosely coupled*: setiap aplikasi tidak mengetahui keberadaan aplikasi lain. Seluruh orkestrasi dilakukan oleh **Integration Layer** yang mengonsumsi event dari RabbitMQ.
+Sistem bekerja *loosely coupled* untuk komunikasi event-driven. Selain itu, **Perpustakaan mengambil data mahasiswa langsung dari SIAKAD** (REST sinkron) saat peminjaman dibuat — menjadikan SIAKAD sebagai satu-satunya sumber data otoritatif untuk mahasiswa.
 
 ---
 
@@ -61,14 +63,15 @@ Sistem bekerja sepenuhnya *loosely coupled*: setiap aplikasi tidak mengetahui ke
 
 | Method | Path | Deskripsi |
 |--------|------|-----------|
-| `POST` | `/students/` | Daftarkan mahasiswa ke sistem perpustakaan |
-| `GET` | `/students/{nim}` | Detail mahasiswa di sistem perpustakaan |
+| `GET` | `/students/{nim}` | Cek mahasiswa — fetch otomatis dari SIAKAD jika belum di cache lokal |
 | `POST` | `/books/` | Tambah buku baru |
 | `GET` | `/books/` | Daftar semua buku |
 | `GET` | `/books/{book_id}` | Detail buku |
-| `POST` | `/loans/` | Buat transaksi peminjaman (gunakan `student_nim`) |
+| `POST` | `/loans/` | Buat transaksi peminjaman — **auto-fetch mahasiswa dari SIAKAD** |
 | `PATCH` | `/loans/{loan_id}/return` | Kembalikan buku — **memicu event RabbitMQ jika terlambat** |
 
+> Pendaftaran mahasiswa manual (`POST /students/`) **dihapus** — data mahasiswa sepenuhnya bersumber dari SIAKAD.
+>
 > Dokumentasi interaktif: `http://localhost:8001/docs`
 
 ### 2. Keuangan (`localhost:8002`)
@@ -85,8 +88,9 @@ Sistem bekerja sepenuhnya *loosely coupled*: setiap aplikasi tidak mengetahui ke
 | Method | Path | Deskripsi |
 |--------|------|-----------|
 | `POST` | `/students/` | Tambah data mahasiswa |
-| `GET` | `/students/{nim}` | Detail mahasiswa |
+| `GET` | `/students/{nim}` | Detail mahasiswa — **termasuk `library_debt` dan `library_debt_notes`** |
 | `PATCH` | `/students/{nim}/status` | Perbarui status akademik (ACTIVE / SUSPENDED / GRADUATED) |
+| `PATCH` | `/students/{nim}/library-debt` | Catat utang perpustakaan — dipanggil oleh Integration Layer |
 
 > Dokumentasi interaktif: `http://localhost:8003/docs`
 
@@ -135,6 +139,8 @@ Dipublikasikan ke exchange `library.exchange` dengan routing key `book.return.la
 
 Dihasilkan oleh **Message Translator** (CDM → SOAP) menggunakan `lxml`, dikirim via `POST /soap`.
 
+> Semua elemen parameter wajib memakai prefix namespace `tns:` agar lolos validasi XSD Spyne.
+
 ```xml
 <?xml version='1.0' encoding='UTF-8'?>
 <soapenv:Envelope
@@ -143,26 +149,37 @@ Dihasilkan oleh **Message Translator** (CDM → SOAP) menggunakan `lxml`, dikiri
   <soapenv:Header/>
   <soapenv:Body>
     <tns:CreateFine>
-      <studentNim>102022400067</studentNim>
-      <studentName>Paris</studentName>
-      <loanId>c3d4e5f6-a7b8-9012-3456-789012345678</loanId>
-      <bookTitle>Pengantar Sistem Informasi Enterprise</bookTitle>
-      <totalFee>50000.0</totalFee>
-      <overdueDays>10</overdueDays>
-      <currency>IDR</currency>
+      <tns:studentNim>2024001</tns:studentNim>
+      <tns:studentName>Budi Santoso</tns:studentName>
+      <tns:loanId>f853a241-1c41-4341-beb3-334febea7afc</tns:loanId>
+      <tns:bookTitle>Pemrograman Python Modern</tns:bookTitle>
+      <tns:totalFee>135000.0</tns:totalFee>
+      <tns:overdueDays>27</tns:overdueDays>
+      <tns:currency>IDR</tns:currency>
     </tns:CreateFine>
   </soapenv:Body>
 </soapenv:Envelope>
 ```
 
-### JSON — REST call dari Integration Layer ke SIAKAD
+### JSON — REST call dari Integration Layer ke SIAKAD (Utang Perpustakaan)
 
 ```json
-PATCH /students/102022400067/status
+PATCH /students/2024001/library-debt
+
+{
+  "amount": 135000.0,
+  "notes": "[2026-06-11] Keterlambatan pengembalian buku \"Pemrograman Python Modern\" selama 27 hari. Denda: IDR 135000.0. Ref tagihan: 0cc2c5e3-..."
+}
+```
+
+### JSON — REST call dari Integration Layer ke SIAKAD (Suspensi)
+
+```json
+PATCH /students/2024001/status
 
 {
   "status": "SUSPENDED",
-  "reason": "Keterlambatan pengembalian buku \"Pengantar Sistem Informasi Enterprise\" selama 10 hari. Denda: IDR 50000.0. Referensi tagihan: <fine_id>."
+  "reason": "Keterlambatan pengembalian buku \"Pemrograman Python Modern\" selama 27 hari. Denda: IDR 135000.0. Referensi tagihan: 0cc2c5e3-..."
 }
 ```
 
@@ -286,45 +303,43 @@ Semua layanan harus berstatus `running` atau `healthy`.
 **5. Uji alur integrasi end-to-end**
 
 ```bash
-# a) Tambah mahasiswa ke SIAKAD
+# a) Tambah mahasiswa ke SIAKAD (satu-satunya tempat registrasi)
 curl -X POST http://localhost:8003/students/ \
   -H "Content-Type: application/json" \
-  -d '{"nim":"102022400067","name":"Paris","program_studi":"Sistem Informasi","angkatan":"2022"}'
+  -d '{"nim":"2024001","name":"Budi Santoso","program_studi":"Teknik Informatika","angkatan":"2024"}'
 
-# b) Daftarkan mahasiswa yang sama ke sistem Perpustakaan
-curl -X POST http://localhost:8001/students/ \
-  -H "Content-Type: application/json" \
-  -d '{"nim":"102022400067","name":"Paris"}'
-
-# c) Tambah buku ke Perpustakaan
+# b) Tambah buku ke Perpustakaan
 curl -X POST http://localhost:8001/books/ \
   -H "Content-Type: application/json" \
-  -d '{"title":"Pengantar EAI","isbn":"978-000-0000-00-0","author":"Dosen EAI"}'
+  -d '{"title":"Pemrograman Python Modern","isbn":"978-602-12345-1","author":"Dr. Ahmad Yani"}'
 
-# Catat book_id dari respons langkah c
+# Catat book_id dari respons langkah b
 
-# d) Buat peminjaman (gunakan book_id dari langkah c, student_nim berupa NIM)
+# c) Buat peminjaman — Perpustakaan otomatis fetch data mahasiswa dari SIAKAD
 curl -X POST http://localhost:8001/loans/ \
   -H "Content-Type: application/json" \
-  -d '{"book_id":"<book_id>","student_nim":"102022400067","loan_date":"2025-05-01","due_date":"2025-05-15"}'
+  -d '{"book_id":"<book_id>","student_nim":"2024001","loan_date":"2026-05-01","due_date":"2026-05-15"}'
 
 # Catat loan_id dari respons
 
-# e) Kembalikan buku TERLAMBAT — ini memicu event integrasi
+# d) Kembalikan buku TERLAMBAT — ini memicu event integrasi
 curl -X PATCH http://localhost:8001/loans/<loan_id>/return \
   -H "Content-Type: application/json" \
-  -d '{"return_date":"2025-06-02"}'
+  -d '{"return_date":"2026-06-11"}'
 ```
 
-Setelah langkah (e), Integration Layer akan:
+Setelah langkah (d), Integration Layer akan:
 1. Menerima event `book.return.late` dari RabbitMQ
-2. Membuat denda di Keuangan via SOAP
-3. Menangguhkan status akademik mahasiswa di SIAKAD
+2. Membuat tagihan denda di Keuangan via SOAP → mendapat `fine_id`
+3. Mencatat utang perpustakaan di SIAKAD (`library_debt += 135000`, append ke `library_debt_notes`)
+4. Menangguhkan status akademik mahasiswa di SIAKAD → `SUSPENDED`
 
 ```bash
-# f) Verifikasi: cek status mahasiswa di SIAKAD
-curl http://localhost:8003/students/102022400067
-# academic_status harus menjadi "SUSPENDED"
+# e) Verifikasi: cek status mahasiswa di SIAKAD
+curl http://localhost:8003/students/2024001
+# academic_status harus "SUSPENDED"
+# library_debt harus 135000.0
+# library_debt_notes berisi detail denda + referensi fine_id
 ```
 
 **6. Melihat log Integration Layer secara real-time**
@@ -353,14 +368,16 @@ docker compose down -v
 ├── .env
 ├── perpustakaan/
 │   ├── Dockerfile
+│   ├── requirements.txt
 │   └── app/
 │       ├── main.py
 │       ├── models.py
 │       ├── publisher.py          ← EIP: Publish-Subscribe
+│       ├── siakad_client.py      ← Fetch mahasiswa dari SIAKAD (REST sinkron)
 │       └── routers/
-│           ├── students.py
+│           ├── students.py       ← GET only, auto-sync dari SIAKAD
 │           ├── books.py
-│           └── loans.py
+│           └── loans.py          ← Auto-fetch mahasiswa via siakad_client
 ├── keuangan/
 │   ├── Dockerfile
 │   └── app/
@@ -371,9 +388,9 @@ docker compose down -v
 │   ├── Dockerfile
 │   └── app/
 │       ├── main.py
-│       ├── models.py
+│       ├── models.py             ← Termasuk kolom library_debt & library_debt_notes
 │       └── routers/
-│           └── students.py
+│           └── students.py       ← Tambah PATCH /{nim}/library-debt
 └── integration-layer/
     ├── Dockerfile
     └── app/
@@ -386,8 +403,8 @@ docker compose down -v
         │   ├── json_to_cdm.py    ← EIP: Message Translator (JSON → CDM)
         │   └── cdm_to_soap.py    ← EIP: Message Translator (CDM → SOAP/XML)
         └── clients/
-            ├── keuangan_client.py
-            └── siakad_client.py
+            ├── keuangan_client.py   ← SOAP call ke Keuangan
+            └── siakad_client.py     ← suspend_student + update_library_debt
 ```
 
 ---
@@ -397,8 +414,9 @@ docker compose down -v
 | Pola | Lokasi | Deskripsi |
 |------|--------|-----------|
 | **Publish-Subscribe** | `perpustakaan/publisher.py` + `integration-layer/consumer.py` | Topic exchange memungkinkan beberapa subscriber di masa depan |
-| **Message Translator** | `integration-layer/translators/` | JSON → CDM (normalisasi), CDM → SOAP 1.1 XML (transformasi) |
-| **Content-Based Router** | `integration-layer/router.py` | Routing berdasarkan `event_type` dalam CDM |
+| **Message Translator** | `integration-layer/translators/json_to_cdm.py` | JSON raw bytes → CDM (normalisasi tipe data) |
+| **Message Translator** | `integration-layer/translators/cdm_to_soap.py` | CDM → SOAP 1.1 XML dengan namespace TNS di setiap elemen |
+| **Content-Based Router** | `integration-layer/router.py` | Routing berdasarkan `event_type`; orchestrate 3 downstream calls |
 | **Dead-Letter Queue** | `integration-layer/consumer.py` | Pesan gagal/malformed diarahkan ke `library.dlq` untuk audit |
 | **Canonical Data Model** | `integration-layer/cdm/models.py` | Model perantara teknologi-agnostik (`LateFeeEventCDM`) |
 
