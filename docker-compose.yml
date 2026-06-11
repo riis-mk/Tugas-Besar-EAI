@@ -85,6 +85,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${PERPUSTAKAAN_DB_USER}:${PERPUSTAKAAN_DB_PASS}@postgres_perpustakaan:5432/${PERPUSTAKAAN_DB_NAME}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      SIAKAD_REST_URL: http://siakad:8000
     ports:
       - "8001:8000"
     depends_on:
@@ -92,6 +93,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      siakad:
+        condition: service_started
 
   keuangan:
     build: ./keuangan

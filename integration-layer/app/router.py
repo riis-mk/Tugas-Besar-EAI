@@ -11,7 +11,7 @@ import logging
 
 from app.cdm.models import EventType, LateFeeEventCDM
 from app.clients.keuangan_client import call_create_fine
-from app.clients.siakad_client import suspend_student
+from app.clients.siakad_client import suspend_student, update_library_debt
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,8 @@ def _handle_late_return(event: LateFeeEventCDM) -> None:
     """
     Orchestrates the late-return flow:
       1. Keuangan  — create fine (SOAP/XML)
-      2. SIAKAD    — suspend student (REST/JSON)   ← only if step 1 succeeds
+      2. SIAKAD    — catat utang perpustakaan (REST/JSON)
+      3. SIAKAD    — suspend student (REST/JSON)   ← hanya jika step 1 berhasil
     """
     nim = event.student.nim
 
@@ -39,10 +40,23 @@ def _handle_late_return(event: LateFeeEventCDM) -> None:
         nim, event.loan.id, event.loan.total_fee, event.loan.currency, event.loan.overdue_days,
     )
 
-    # Step 1: bill the student
+    # Step 1: tagih ke keuangan
     fine_id = call_create_fine(event)
 
-    # Step 2: suspend academic access (only after billing confirms)
+    # Step 2: catat utang perpustakaan di SIAKAD
+    debt_notes = (
+        f"[{event.timestamp.date()}] Keterlambatan pengembalian buku \"{event.book.title}\" "
+        f"selama {event.loan.overdue_days} hari. "
+        f"Denda: {event.loan.currency} {event.loan.total_fee}. "
+        f"Ref tagihan: {fine_id}."
+    )
+    update_library_debt(
+        student_nim=nim,
+        amount=float(event.loan.total_fee),
+        notes=debt_notes,
+    )
+
+    # Step 3: suspensi akses akademik
     reason = (
         f"Keterlambatan pengembalian buku \"{event.book.title}\" "
         f"selama {event.loan.overdue_days} hari. "
@@ -52,6 +66,6 @@ def _handle_late_return(event: LateFeeEventCDM) -> None:
     suspend_student(student_nim=nim, reason=reason)
 
     logger.info(
-        "[Router] Flow selesai — event_id=%s  fine_id=%s  student=%s SUSPENDED",
-        event.event_id, fine_id, nim,
+        "[Router] Flow selesai — event_id=%s  fine_id=%s  student=%s SUSPENDED  debt=+%s",
+        event.event_id, fine_id, nim, event.loan.total_fee,
     )

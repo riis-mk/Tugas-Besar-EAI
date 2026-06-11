@@ -44,7 +44,7 @@ def build_create_fine_envelope(event: LateFeeEventCDM) -> bytes:
     }
 
     for tag, value in fields.items():
-        child = etree.SubElement(op, tag)
+        child = etree.SubElement(op, f"{{{TNS}}}{tag}")
         child.text = value
 
     xml_bytes = etree.tostring(

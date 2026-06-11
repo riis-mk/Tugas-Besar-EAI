@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String
+from sqlalchemy import Column, Float, String, Text
 from app.database import Base
 
 
@@ -11,3 +11,7 @@ class Student(Base):
     academic_status = Column(String(20), default="ACTIVE")   # ACTIVE | SUSPENDED | GRADUATED
     program_studi   = Column(String(100))
     angkatan        = Column(String(4))
+
+    # Informasi utang dari Perpustakaan (diupdate oleh Integration Layer)
+    library_debt        = Column(Float, default=0.0, nullable=False)
+    library_debt_notes  = Column(Text, nullable=True)
