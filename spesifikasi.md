@@ -84,12 +84,22 @@ library.exchange (topic)
 | `POST` | `/books/` | Tambah buku baru |
 | `GET` | `/books/` | Daftar semua buku |
 | `GET` | `/books/{book_id}` | Detail buku |
-| `POST` | `/loans/` | Buat transaksi peminjaman |
+| `POST` | `/loans/` | Buat transaksi peminjaman — **auto-fetch mahasiswa dari SIAKAD** |
 | `PATCH` | `/loans/{loan_id}/return` | Kembalikan buku — **memicu event RabbitMQ jika terlambat** |
+| `GET` | `/students/{nim}` | Detail mahasiswa (dari cache lokal atau di-fetch dari SIAKAD) |
 
 ### Behaviour Integrasi
 
-Ketika `return_date > due_date`, service mempublikasikan event `book.return.late` ke RabbitMQ dengan payload JSON yang berisi data mahasiswa, buku, dan detail keterlambatan termasuk kalkulasi denda (Rp 5.000/hari).
+**Saat peminjaman dibuat (`POST /loans/`):** Perpustakaan tidak memiliki registrasi mahasiswa mandiri. Data mahasiswa diambil langsung dari SIAKAD via `GET http://siakad:8000/students/{nim}`. Jika NIM tidak terdaftar di SIAKAD, peminjaman ditolak (404). Data yang berhasil diambil disimpan ke cache lokal untuk efisiensi permintaan berikutnya.
+
+**Saat pengembalian terlambat:** Ketika `return_date > due_date`, service mempublikasikan event `book.return.late` ke RabbitMQ dengan payload JSON yang berisi data mahasiswa, buku, dan detail keterlambatan termasuk kalkulasi denda (Rp 5.000/hari).
+
+### Dependensi Eksternal
+
+| Layanan | Tujuan | Env Var |
+|---|---|---|
+| RabbitMQ | Publish event keterlambatan | `RABBITMQ_URL` |
+| SIAKAD | Fetch data mahasiswa saat peminjaman | `SIAKAD_REST_URL` |
 
 ---
 
@@ -157,16 +167,37 @@ Ketika `return_date > due_date`, service mempublikasikan event `book.return.late
 | Method | Path | Deskripsi |
 |---|---|---|
 | `POST` | `/students/` | Tambah data mahasiswa |
-| `GET` | `/students/{nim}` | Detail mahasiswa berdasarkan NIM |
-| `PATCH` | `/students/{nim}/status` | Perbarui status akademik |
+| `GET` | `/students/{nim}` | Detail mahasiswa — **termasuk info utang perpustakaan** |
+| `PATCH` | `/students/{nim}/status` | Perbarui status akademik — dipanggil oleh Integration Layer |
+| `PATCH` | `/students/{nim}/library-debt` | Catat utang perpustakaan — dipanggil oleh Integration Layer |
 
 ### Status Akademik
 
 | Nilai | Keterangan |
 |---|---|
 | `ACTIVE` | Mahasiswa aktif (default) |
-| `SUSPENDED` | Ditangguhkan — dipicu oleh Integration Layer |
+| `SUSPENDED` | Ditangguhkan — dipicu oleh Integration Layer setelah keterlambatan pengembalian buku |
 | `GRADUATED` | Lulus |
+
+### Informasi Utang Perpustakaan
+
+Field tambahan pada response `GET /students/{nim}`:
+
+| Field | Tipe | Keterangan |
+|---|---|---|
+| `library_debt` | Float | Total akumulasi utang perpustakaan (IDR), default 0.0 |
+| `library_debt_notes` | Text / null | Riwayat catatan denda (append per kejadian) |
+
+**Contoh response:**
+```json
+{
+  "nim": "2024001",
+  "name": "Budi Santoso",
+  "academic_status": "SUSPENDED",
+  "library_debt": 135000.0,
+  "library_debt_notes": "[2026-06-11] Keterlambatan pengembalian buku \"Pemrograman Python Modern\" selama 27 hari. Denda: IDR 135000.0. Ref tagihan: 0cc2c5e3-..."
+}
+```
 
 ---
 
@@ -223,7 +254,12 @@ Model perantara teknologi-agnostik yang memisahkan format sumber dari format tuj
                 ├── [3] cdm_to_soap.py    LateFeeEventCDM → SOAP 1.1 XML
                 │         └── keuangan_client.py  POST /soap  → fine_id
                 │
-                └── [4] siakad_client.py  PATCH /students/{nim}/status
+                ├── [4] siakad_client.update_library_debt()
+                │         PATCH /students/{nim}/library-debt
+                │         (catat utang + riwayat denda)
+                │
+                └── [5] siakad_client.suspend_student()
+                          PATCH /students/{nim}/status → SUSPENDED
                           (hanya jika step 3 sukses)
 ```
 
@@ -303,6 +339,8 @@ Model perantara teknologi-agnostik yang memisahkan format sumber dari format tuj
 | academic_status | String(20) | default: ACTIVE |
 | program_studi | String(100) | — |
 | angkatan | String(4) | — |
+| library_debt | Float | default: 0.0, NOT NULL |
+| library_debt_notes | Text | NULL |
 
 ---
 
@@ -310,10 +348,12 @@ Model perantara teknologi-agnostik yang memisahkan format sumber dari format tuj
 
 | Arah | Protokol | Format | Detail |
 |---|---|---|---|
+| Perpustakaan → SIAKAD | HTTP | REST JSON | `GET http://siakad:8000/students/{nim}` — fetch data mahasiswa saat peminjaman |
 | Perpustakaan → RabbitMQ | AMQP | JSON | routing key: `book.return.late` |
 | RabbitMQ → Integration Layer | AMQP | JSON | queue: `library.events.queue` |
 | Integration Layer → Keuangan | HTTP | SOAP 1.1 XML | `POST http://keuangan:8000/soap` |
-| Integration Layer → SIAKAD | HTTP | REST JSON | `PATCH http://siakad:8000/students/{nim}/status` |
+| Integration Layer → SIAKAD | HTTP | REST JSON | `PATCH http://siakad:8000/students/{nim}/library-debt` — catat utang |
+| Integration Layer → SIAKAD | HTTP | REST JSON | `PATCH http://siakad:8000/students/{nim}/status` — suspensi |
 
 ### Format JSON Event (Perpustakaan → RabbitMQ)
 
@@ -346,26 +386,39 @@ Model perantara teknologi-agnostik yang memisahkan format sumber dari format tuj
   <soapenv:Header/>
   <soapenv:Body>
     <tns:CreateFine>
-      <studentNim>102022400067</studentNim>
-      <studentName>Paris</studentName>
-      <loanId>c3d4e5f6-...</loanId>
-      <bookTitle>Pengantar EAI</bookTitle>
-      <totalFee>90000.0</totalFee>
-      <overdueDays>18</overdueDays>
-      <currency>IDR</currency>
+      <tns:studentNim>2024001</tns:studentNim>
+      <tns:studentName>Budi Santoso</tns:studentName>
+      <tns:loanId>f853a241-...</tns:loanId>
+      <tns:bookTitle>Pemrograman Python Modern</tns:bookTitle>
+      <tns:totalFee>135000.0</tns:totalFee>
+      <tns:overdueDays>27</tns:overdueDays>
+      <tns:currency>IDR</tns:currency>
     </tns:CreateFine>
   </soapenv:Body>
 </soapenv:Envelope>
 ```
 
-### Format REST JSON (Integration Layer → SIAKAD)
+> **Catatan penting:** Seluruh elemen parameter di dalam `<tns:CreateFine>` harus menggunakan namespace TNS (`tns:`). Spyne dengan `validator="lxml"` melakukan validasi XSD ketat dan menolak elemen tanpa namespace.
+
+### Format REST JSON (Integration Layer → SIAKAD — Utang Perpustakaan)
 
 ```json
-PATCH /students/102022400067/status
+PATCH /students/2024001/library-debt
+
+{
+  "amount": 135000.0,
+  "notes": "[2026-06-11] Keterlambatan pengembalian buku \"Pemrograman Python Modern\" selama 27 hari. Denda: IDR 135000.0. Ref tagihan: 0cc2c5e3-..."
+}
+```
+
+### Format REST JSON (Integration Layer → SIAKAD — Suspensi)
+
+```json
+PATCH /students/2024001/status
 
 {
   "status": "SUSPENDED",
-  "reason": "Keterlambatan pengembalian buku \"Pengantar EAI\" selama 18 hari. Denda: IDR 90000.0. Referensi tagihan: <fine_id>."
+  "reason": "Keterlambatan pengembalian buku \"Pemrograman Python Modern\" selama 27 hari. Denda: IDR 135000.0. Referensi tagihan: 0cc2c5e3-..."
 }
 ```
 
